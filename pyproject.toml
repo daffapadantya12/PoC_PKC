@@ -1,0 +1,14 @@
+[project]
+name = "grokpersonalizedlearningmvp"
+version = "0.1.0"
+description = "YouTube-based Physics Learning App for Newton's Laws"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "scrapetube>=2.0.0",
+    "youtube-transcript-api>=0.6.0",
+    "streamlit>=1.30.0",
+    "litellm>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "sentence-transformers>=2.2.0",
+]
