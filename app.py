@@ -22,6 +22,18 @@ import scrapetube
 import streamlit as st
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
+from minio_whisper import (
+    get_minio_client,
+    list_minio_videos,
+    get_minio_public_url,
+    download_minio_object_to_tmp,
+    process_minio_video_to_indonesian_srt,
+    build_video_player_with_subtitles,
+    batch_ensure_subtitles,
+    ensure_subtitle_for_key,
+    search_minio_videos_by_query,
+    object_exists,
+)
 
 # Load environment variables
 load_dotenv()
@@ -484,6 +496,12 @@ def init_session_state():
         st.session_state.current_timestamp = 0
     if "is_fetching" not in st.session_state:
         st.session_state.is_fetching = False
+    if "minio_client" not in st.session_state:
+        st.session_state.minio_client = get_minio_client()
+    if "minio_auto_processed" not in st.session_state:
+        st.session_state.minio_auto_processed = False
+    if "minio_current_key" not in st.session_state:
+        st.session_state.minio_current_key = None
 
 
 def process_new_topic(topic: str):
@@ -492,6 +510,23 @@ def process_new_topic(topic: str):
     Automatically selects the first video for seamless playback.
     """
     cache = load_cache()
+
+    # MinIO-driven selection from chat (no manual search UI)
+    prefix = os.getenv("MINIO_PREFIX", "downloads").strip("/")
+    all_keys = list_minio_videos(prefix=f"{prefix}/")
+    if all_keys:
+        ranked = search_minio_videos_by_query(topic, all_keys, top_k=len(all_keys))
+        if ranked:
+            selected_key = ranked[0]
+            st.session_state.minio_current_key = selected_key
+            st.session_state.current_topic = topic
+            st.session_state.current_video_id = None
+            st.session_state.current_timestamp = 0
+            try:
+                ensure_subtitle_for_key(selected_key)
+            except Exception:
+                pass
+            return True, "minio"
 
     # Use semantic search to find similar topic in cache
     cached_data, _ = semantic_search_cache(topic, cache)
@@ -669,7 +704,19 @@ def main():
 
     # Right column - Video
     with video_col:
-        if st.session_state.current_video_id:
+        # Prefer MinIO playback when a MinIO key has been selected by chat
+        if st.session_state.minio_current_key:
+            key = st.session_state.minio_current_key
+            st.markdown(f"### {Path(key).stem}")
+            video_url = get_minio_public_url(key)
+            try:
+                subtitle_url, _ = ensure_subtitle_for_key(key)
+            except Exception:
+                subtitle_url = None
+            embed_html = build_video_player_with_subtitles(video_url, subtitle_url)
+            st.components.v1.html(embed_html, height=480)
+
+        elif st.session_state.current_video_id:
             # Find current video info
             current_video = None
             for video in st.session_state.topic_videos:
@@ -714,9 +761,10 @@ def main():
                             st.rerun()
 
         else:
-            # No video yet - show welcome
             st.markdown("### 📺 Video Pembelajaran")
             st.info("💡 Ketik topik yang ingin kamu pelajari di chat untuk memulai!")
+
+                    # Tombol manual dihapus; proses dan embed dilakukan otomatis di atas
 
 
 if __name__ == "__main__":

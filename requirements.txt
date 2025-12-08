@@ -257,3 +257,5 @@ youtube-transcript-api==1.2.3
     # via grokpersonalizedlearningmvp (pyproject.toml)
 zipp==3.23.0
     # via importlib-metadata
+minio
+faster-whisper
