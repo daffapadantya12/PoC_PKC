@@ -33,6 +33,9 @@ from minio_whisper import (
     ensure_subtitle_for_key,
     search_minio_videos_by_query,
     object_exists,
+    list_text_subtitles,
+    get_text_subtitle_content,
+    find_video_key_by_stem,
 )
 
 # Load environment variables
@@ -48,13 +51,25 @@ MAX_VIDEOS_PER_TOPIC = 5
 
 @st.cache_resource
 def get_embedding_model() -> object:
-    """Load and cache the sentence transformer model for semantic search."""
+    """Load and cache the sentence transformer model for semantic search.
+
+    Disabled by default via ENABLE_EMBEDDINGS env flag to avoid crashes.
+    """
+    if os.getenv("ENABLE_EMBEDDINGS", "false").lower() != "true":
+        return None
     try:
         from sentence_transformers import SentenceTransformer
         return SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     except Exception:
         st.warning("Embedding model unavailable; using lightweight text similarity.")
         return None
+
+
+def safe_similarity(text1: str, text2: str) -> float:
+    try:
+        return compute_similarity(text1, text2)
+    except Exception:
+        return 0.0
 
 
 def compute_similarity(text1: str, text2: str) -> float:
@@ -424,6 +439,30 @@ Ingat:
 """
 
 
+def chunk_text(text: str, max_chars: int = 1000, overlap: int = 150) -> list[str]:
+    """Split long text into overlapping chunks for RAG.
+
+    Uses simple character windowing with overlap to keep context.
+    """
+    if not text:
+        return []
+    text = text.strip()
+    if len(text) <= max_chars:
+        return [text]
+    chunks: list[str] = []
+    i = 0
+    n = len(text)
+    step = max_chars - overlap if max_chars > overlap else max_chars
+    while i < n:
+        end = min(i + max_chars, n)
+        chunk = text[i:end]
+        chunks.append(chunk)
+        if end == n:
+            break
+        i += step
+    return chunks
+
+
 def chat_with_context(
     messages: list[dict],
     topic: str,
@@ -511,7 +550,72 @@ def process_new_topic(topic: str):
     """
     cache = load_cache()
 
-    # MinIO-driven selection from chat (no manual search UI)
+    # RAG terlebih dahulu: cari di MinIO folder 'subtitles' (.txt), lalu map ke video
+    try:
+        sub_prefix = os.getenv("MINIO_SUBTITLES_PREFIX", "subtitles").strip("/") + "/"
+        text_keys = list_text_subtitles(prefix=sub_prefix)
+    except Exception:
+        text_keys = []
+    # Batasi jumlah dokumen untuk menghindari crash/overhead
+    try:
+        max_docs = int(os.getenv("MAX_SUBTITLE_DOCS", "200"))
+    except Exception:
+        max_docs = 200
+    if len(text_keys) > max_docs:
+        text_keys = text_keys[:max_docs]
+
+    if text_keys:
+        docs: list[tuple[str, str]] = []
+        for tk in text_keys:
+            try:
+                txt = get_text_subtitle_content(tk)
+                if txt:
+                    docs.append((tk, txt))
+            except Exception:
+                continue
+        if docs:
+            q = topic.lower().strip()
+            # Build chunked corpus: (txt_key, stem, chunk_text)
+            corpus: list[tuple[str, str, str]] = []
+            for tk, txt in docs:
+                stem = Path(tk).stem
+                for ch in chunk_text(txt, max_chars=1000, overlap=150):
+                    corpus.append((tk, stem, ch))
+
+            # Substring match prioritas di stem atau isi chunk
+            substr = [c for c in corpus if (q in c[1].lower()) or (q in c[2].lower())]
+            others = [c for c in corpus if c not in substr]
+            # Rank lainnya dengan similarity (aman)
+            ranked_others = sorted(others, key=lambda c: safe_similarity(topic, c[2]), reverse=True)
+            ranked = substr + ranked_others
+
+            if ranked:
+                best = ranked[0]
+                best_txt_key, best_stem, best_chunk = best
+                # Store selected chunk metadata for UI transparency
+                st.session_state.selected_subtitle_chunk = best_chunk
+                st.session_state.selected_subtitle_source = best_txt_key
+                st.session_state.selected_subtitle_score = safe_similarity(topic, best_chunk)
+                vid_prefix = os.getenv("MINIO_PREFIX", "downloads").strip("/") + "/"
+                video_key = find_video_key_by_stem(best_stem, prefix=vid_prefix)
+                if not video_key:
+                    # Fallback: search by query across video filenames
+                    all_keys = list_minio_videos(prefix=vid_prefix)
+                    ranked_videos = search_minio_videos_by_query(topic, all_keys, top_k=len(all_keys))
+                    video_key = ranked_videos[0] if ranked_videos else None
+
+                if video_key:
+                    st.session_state.minio_current_key = video_key
+                    st.session_state.current_topic = topic
+                    st.session_state.current_video_id = None
+                    st.session_state.current_timestamp = 0
+                    try:
+                        ensure_subtitle_for_key(video_key)
+                    except Exception:
+                        pass
+                    return True, "minio_subtitles"
+
+    # MinIO-driven selection dari nama file (fallback jika RAG tidak menemukan)
     prefix = os.getenv("MINIO_PREFIX", "downloads").strip("/")
     all_keys = list_minio_videos(prefix=f"{prefix}/")
     if all_keys:
@@ -522,57 +626,56 @@ def process_new_topic(topic: str):
             st.session_state.current_topic = topic
             st.session_state.current_video_id = None
             st.session_state.current_timestamp = 0
+            # Clear any previously selected subtitle chunk (fallback path)
+            st.session_state.selected_subtitle_chunk = None
+            st.session_state.selected_subtitle_source = None
+            st.session_state.selected_subtitle_score = None
             try:
                 ensure_subtitle_for_key(selected_key)
             except Exception:
                 pass
             return True, "minio"
 
-    # Use semantic search to find similar topic in cache
+    # Gunakan semantic search cache (YouTube fallback jika benar-benar tidak ada di MinIO)
     cached_data, _ = semantic_search_cache(topic, cache)
 
     if cached_data:
-        # Use cached data - NO YouTube search needed
         videos = cached_data["videos"]
         st.session_state.topic_videos = videos
         st.session_state.current_topic = cached_data.get("original_topic", topic)
 
-        # Auto-select first video for seamless experience
+        # Clear subtitle chunk info when using YouTube/cache
+        st.session_state.selected_subtitle_chunk = None
+        st.session_state.selected_subtitle_source = None
+        st.session_state.selected_subtitle_score = None
+
         if videos:
             st.session_state.current_video_id = videos[0]["video_id"]
             st.session_state.current_timestamp = 0
 
         return True, "cache"
     else:
-        # Topic is truly new - fetch from YouTube
         st.session_state.is_fetching = True
 
         with st.spinner(f"🔍 Mencari video tentang '{topic}'..."):
-            # Generate search queries
             queries = generate_search_queries(topic)
-
-            # Fetch videos
             videos = fetch_videos_for_queries(queries, MAX_VIDEOS_PER_TOPIC)
 
             if videos:
-                # Save to cache
                 append_to_cache(topic, queries, videos)
-
-                # Update session state
                 st.session_state.topic_videos = videos
                 st.session_state.current_topic = topic
                 st.session_state.is_fetching = False
-
-                # Auto-select first video for seamless experience
                 st.session_state.current_video_id = videos[0]["video_id"]
                 st.session_state.current_timestamp = 0
-
+                # Clear subtitle chunk info when fetching YouTube videos
+                st.session_state.selected_subtitle_chunk = None
+                st.session_state.selected_subtitle_source = None
+                st.session_state.selected_subtitle_score = None
                 return True, "fetched"
             else:
                 st.session_state.is_fetching = False
                 return False, "no_videos"
-
-
 # =============================================================================
 # Main Application
 # =============================================================================
@@ -700,6 +803,10 @@ def main():
             st.session_state.topic_videos = []
             st.session_state.current_video_id = None
             st.session_state.current_timestamp = 0
+            st.session_state.minio_current_key = None
+            st.session_state.selected_subtitle_chunk = None
+            st.session_state.selected_subtitle_source = None
+            st.session_state.selected_subtitle_score = None
             st.rerun()
 
     # Right column - Video
@@ -715,6 +822,18 @@ def main():
                 subtitle_url = None
             embed_html = build_video_player_with_subtitles(video_url, subtitle_url)
             st.components.v1.html(embed_html, height=480)
+            # Subtitle chunk panel for transparency
+            chunk = st.session_state.get("selected_subtitle_chunk")
+            if chunk:
+                with st.expander("📝 Subtitle terkait topik", expanded=False):
+                    src = st.session_state.get("selected_subtitle_source")
+                    score = st.session_state.get("selected_subtitle_score")
+                    if src:
+                        st.caption(f"Dokumen: {src}")
+                    if score is not None:
+                        st.caption(f"Kecocokan: {score:.3f}")
+                    display_text = format_subtitle_chunk_for_panel(chunk)
+                    st.markdown(f"```text\n{display_text}\n```")
 
         elif st.session_state.current_video_id:
             # Find current video info
@@ -765,6 +884,70 @@ def main():
             st.info("💡 Ketik topik yang ingin kamu pelajari di chat untuk memulai!")
 
                     # Tombol manual dihapus; proses dan embed dilakukan otomatis di atas
+
+
+
+def seconds_to_mmss(seconds: float) -> str:
+    s = int(round(float(seconds)))
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def convert_time_spans_to_mmss(text: str) -> str:
+    pattern = r"\[(\d+(?:\.\d+)?)s\s*-\s*(\d+(?:\.\d+)?)s\]"
+    def repl(m: re.Match) -> str:
+        start = seconds_to_mmss(float(m.group(1)))
+        end = seconds_to_mmss(float(m.group(2)))
+        return f"[{start} - {end}]"
+    try:
+        return re.sub(pattern, repl, text)
+    except Exception:
+        return text
+
+
+def translate_to_indonesian(text: str) -> str:
+    """Translate text to Indonesian using configured LLM; preserve timestamps.
+
+    Controlled by env TRANSLATE_SUBTITLE_PANEL (default true). Falls back to original
+    text on failure or when disabled.
+    """
+    if os.getenv("TRANSLATE_SUBTITLE_PANEL", "true").lower() != "true":
+        return text
+    try:
+        response = litellm.completion(
+            model=LLM_MODEL,
+            api_base=LLM_API_BASE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a translation assistant. Translate the user's text to Indonesian. "
+                        "Preserve timestamps and numeric values. Return ONLY the translated text."
+                    ),
+                },
+                {"role": "user", "content": text},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+    except Exception:
+        return text
+
+
+def format_subtitle_chunk_for_panel(chunk: str) -> str:
+    """Format RAG-selected chunk for UI: mm:ss times and Indonesian translation.
+
+    Caches the result per chunk in session_state to avoid repeated LLM calls.
+    """
+    if not chunk:
+        return ""
+    cache = st.session_state.get("translated_chunk_cache", {})
+    cache_key = chunk
+    if cache.get(cache_key):
+        return cache[cache_key]
+    text_mmss = convert_time_spans_to_mmss(chunk)
+    translated = translate_to_indonesian(text_mmss)
+    cache[cache_key] = translated
+    st.session_state.translated_chunk_cache = cache
+    return translated
 
 
 if __name__ == "__main__":

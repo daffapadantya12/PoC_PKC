@@ -342,6 +342,54 @@ def search_minio_videos_by_query(query: str, keys: list[str], top_k: int = 20) -
     return (substr + ranked)[:top_k]
 
 
+def list_text_subtitles(prefix: str = "subtitles/") -> list[str]:
+    """List .txt subtitle documents stored in MinIO under given prefix."""
+    client = st.session_state.get("minio_client") or get_minio_client()
+    if not client:
+        return []
+    bucket = os.getenv("MINIO_BUCKET", "pkc")
+    keys: list[str] = []
+    try:
+        for obj in client.list_objects(bucket, prefix=prefix, recursive=True):
+            name = obj.object_name
+            if Path(name).suffix.lower() == ".txt":
+                keys.append(name)
+    except Exception:
+        return []
+    return keys
+
+
+def get_text_subtitle_content(key: str) -> str:
+    """Download and return the text content of a MinIO subtitle .txt."""
+    client = st.session_state.get("minio_client") or get_minio_client()
+    if not client:
+        return ""
+    bucket = os.getenv("MINIO_BUCKET", "pkc")
+    try:
+        response = client.get_object(bucket, key)
+        data = response.read()
+        response.close()
+        response.release_conn()
+        return data.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def find_video_key_by_stem(stem: str, prefix: str = "downloads/") -> str | None:
+    """Find a video key in MinIO with a filename stem matching the provided stem."""
+    keys = list_minio_videos(prefix=prefix)
+    # Exact stem match first
+    for k in keys:
+        if Path(k).stem == stem:
+            return k
+    # Fallback: substring match
+    s = stem.lower()
+    for k in keys:
+        if s in Path(k).stem.lower():
+            return k
+    return None
+
+
 if __name__ == "__main__":
     import argparse
 
