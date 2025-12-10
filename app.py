@@ -156,8 +156,8 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
 
     let peerConnection = null, dataChannel = null, audioElement = null, mediaStream = null;
     let isConnected = false, isAIsTurn = false, currentVideoId = null;
-    let originalVideoVolume = 0.0;
-
+    let audioContext = null, audioAnalyser = null, audioAnalysisLoop = null;
+    
     const statusEl = document.getElementById('status');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
@@ -186,12 +186,9 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         }}
     }}
     
-    // --- [FUNGSI PLAYER VIDEO DIPERBAIKI] ---
-    // Mencegah reload jika video sama, hanya seek saja.
     function showVideo(videoData, timestamp = 0) {{
         if (!videoData || !videoData.url) return;
         
-        // Cek jika ID video sama dengan yang sedang aktif
         if (currentVideoId === videoData.id) {{
             console.log("Video sama, melakukan seek ke:", timestamp);
             navigateToTimestamp(timestamp);
@@ -201,10 +198,9 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 searchInfoEl.innerHTML = `⏱️ Melompat ke ${{(minutes > 0 ? minutes + 'm ' : '') + seconds + 's'}}`;
                 searchInfoEl.style.display = 'block';
             }}
-            return; // STOP di sini, jangan load ulang
+            return; 
         }}
 
-        // Jika video berbeda, lakukan load penuh
         currentVideoId = videoData.id;
         videoTitleEl.textContent = '📺 ' + videoData.title;
         videoMetaEl.textContent = `Durasi: ${{videoData.duration}} | Topik: ${{videoData.topics.slice(0, 3).join(', ')}}`;
@@ -226,6 +222,16 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             if (timestamp > 0) {{
                 videoEl.currentTime = timestamp;
             }}
+            
+            // Sync status video dengan status AI saat ini
+            if (isAIsTurn) {{
+                videoEl.muted = true;
+                videoEl.playbackRate = 0.75;
+            }} else {{
+                videoEl.muted = false;
+                videoEl.playbackRate = 1.0;
+            }}
+            
             videoEl.play().catch(e => console.error("Autoplay dicegah:", e));
         }}, {{ once: true }});
     }}
@@ -244,76 +250,100 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         }}
     }}
 
-    // --- [LOGIKA PENCARIAN BARU: SISTEM SKOR] ---
-    // Menggunakan sistem poin untuk menentukan segmen terbaik
+    // --- LOGIKA DETEKSI SUARA AI (AUDIO ANALYSIS) ---
+    // Ini menggantikan ketergantungan pada event API yang sering tidak akurat timing-nya
+    function setupAudioAnalysis(stream) {{
+        try {{
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioContext.createMediaStreamSource(stream);
+            audioAnalyser = audioContext.createAnalyser();
+            audioAnalyser.fftSize = 256;
+            source.connect(audioAnalyser);
+            
+            const dataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
+            let lastSpeechTime = Date.now();
+            let silenceTimer = null;
+            
+            // Loop untuk cek volume terus menerus
+            function checkAudioVolume() {{
+                if (!audioAnalyser) return;
+                
+                audioAnalyser.getByteFrequencyData(dataArray);
+                // Hitung rata-rata volume
+                let sum = 0;
+                for(let i = 0; i < dataArray.length; i++) sum += dataArray[i];
+                const average = sum / dataArray.length;
+                
+                // Ambang batas volume (10 dari 255 cukup untuk mendeteksi suara)
+                if (average > 10) {{
+                    lastSpeechTime = Date.now();
+                    if (!isAIsTurn) {{
+                        // AI TERDETEKSI MULAI BICARA
+                        isAIsTurn = true;
+                        updateStatus('ai-speaking', '🔵 AI Berbicara...'); 
+                        setMicrophoneEnabled(false);
+                        visualizerEl.style.display = 'none';
+                        
+                        // [AKSI 1] Mute & Slow Video
+                        if (!videoEl.paused) {{
+                            videoEl.muted = true;
+                            videoEl.playbackRate = 0.75;
+                        }}
+                    }}
+                }} else {{
+                    // Jika hening lebih dari 800ms, anggap AI selesai bicara
+                    if (isAIsTurn && (Date.now() - lastSpeechTime > 800)) {{
+                        // AI SELESAI BICARA
+                        isAIsTurn = false;
+                        updateStatus('connected', '🟢 Giliran Anda');
+                        setMicrophoneEnabled(true);
+                        
+                        // [AKSI 2] Unmute & Normal Video
+                        videoEl.muted = false;
+                        videoEl.playbackRate = 1.0;
+                    }}
+                }}
+                
+                audioAnalysisLoop = requestAnimationFrame(checkAudioVolume);
+            }}
+            checkAudioVolume();
+        }} catch (e) {{
+            console.error("Gagal setup audio analysis:", e);
+        }}
+    }}
+
     function searchContentAndFindTimestamp(query) {{
         if (!query) return null;
         const queryLower = query.toLowerCase();
-        
-        // 1. Bersihkan query dari simbol
         const cleanQuery = queryLower.replace(/[^\w\s]/gi, '');
-        
-        // 2. Pecah jadi array kata, filter kata yang terlalu pendek (<3 huruf)
         const queryTerms = cleanQuery.split(/\s+/).filter(w => w.length > 2);
 
         let bestMatch = {{ video: null, timestamp: 0, score: 0, matchedText: '' }};
 
         for (const video of VIDEOS_DATA) {{
-            // Skor Dasar (Base Score) dari Judul
             let videoBaseScore = 0;
             if (video.title) {{
                 const titleLower = video.title.toLowerCase();
                 if (titleLower.includes(queryLower)) videoBaseScore = 10;
                 else if (queryTerms.some(term => titleLower.includes(term))) videoBaseScore = 5;
             }}
-
-            // Jika video tidak ada transkrip, hanya andalkan skor judul
             if (!video.transcript || video.transcript.length === 0) {{
-                if (videoBaseScore > bestMatch.score) {{
-                    bestMatch = {{ video: video, timestamp: 0, score: videoBaseScore, matchedText: "Judul Video" }};
-                }}
+                if (videoBaseScore > bestMatch.score) bestMatch = {{ video: video, timestamp: 0, score: videoBaseScore, matchedText: "Judul Video" }};
                 continue;
             }}
-
-            // Cek Transkrip per segmen
             for (const segment of video.transcript) {{
                 if (!segment.text) continue;
                 const textLower = segment.text.toLowerCase();
-                
                 let segmentScore = videoBaseScore; 
-
-                // A. EXACT MATCH (Prioritas Tertinggi)
-                // Jika kalimat transkrip mengandung query utuh
-                if (textLower.includes(cleanQuery) || textLower.includes(queryLower)) {{
-                    segmentScore += 100; 
-                }} else {{
-                    // B. KEYWORD MATCH (Hitung jumlah kata yang cocok)
+                if (textLower.includes(cleanQuery) || textLower.includes(queryLower)) segmentScore += 100; 
+                else {{
                     let hitCount = 0;
-                    queryTerms.forEach(term => {{
-                        if (textLower.includes(term)) hitCount++;
-                    }});
-                    
-                    if (hitCount > 0) {{
-                        // Rumus skor: Kuadrat jumlah match * 5
-                        // 1 match = 5 poin
-                        // 2 match = 20 poin
-                        // 3 match = 45 poin
-                        segmentScore += (hitCount * hitCount * 5);
-                    }}
+                    queryTerms.forEach(term => {{ if (textLower.includes(term)) hitCount++; }});
+                    if (hitCount > 0) segmentScore += (hitCount * hitCount * 5);
                 }}
-
-                // Simpan jika skor ini lebih tinggi dari bestMatch sebelumnya
-                if (segmentScore > bestMatch.score) {{
-                    bestMatch = {{ 
-                        video: video, 
-                        timestamp: segment.start, 
-                        score: segmentScore,
-                        matchedText: segment.text
-                    }};
-                }}
+                if (segmentScore > bestMatch.score) bestMatch = {{ video: video, timestamp: segment.start, score: segmentScore, matchedText: segment.text }};
             }}
         }}
-        
         return bestMatch.score > 0 ? bestMatch : null;
     }}
 
@@ -326,20 +356,15 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     function handleSearchVideo(args, callId) {{
         const query = args.query || '';
         const result = searchContentAndFindTimestamp(query);
-        
         if (result) {{
             const {{ video, timestamp, matchedText }} = result;
             showVideo(video, timestamp);
-            
             const minutes = Math.floor(timestamp / 60);
             const seconds = Math.floor(timestamp % 60);
             const timeStr = timestamp > 0 ? ` (mulai menit ${{minutes}}:${{seconds}})` : "";
-            
             const message = `Saya menemukan video "${{video.title}}"${{timeStr}} yang membahas hal tersebut.`;
-            
             searchInfoEl.innerHTML = `🔍 Ditemukan: <b>${{video.title}}</b><br/><small style="opacity:0.8">Segmen: "${{matchedText}}"</small>`;
             searchInfoEl.style.display = 'block';
-            
             sendFunctionResult(callId, {{ success: true, message: message }});
         }} else {{
             searchInfoEl.style.display = 'none';
@@ -376,13 +401,24 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             if (!tokenResponse.ok) throw new Error(`Gagal sesi: ${{await tokenResponse.text()}}`);
             const sessionData = await tokenResponse.json(); const ephemeralKey = sessionData.client_secret.value;
             peerConnection = new RTCPeerConnection();
-            audioElement = document.createElement('audio'); audioElement.autoplay = true;
-            peerConnection.ontrack = (event) => {{ audioElement.srcObject = event.streams[0]; }};
+            audioElement = document.createElement('audio'); 
+            audioElement.autoplay = true;
+            
+            // [REQ 1] OMONGAN AI DIPERCEPAT 1.25x
+            audioElement.playbackRate = 1.25;
+            
+            peerConnection.ontrack = (event) => {{ 
+                const stream = event.streams[0];
+                audioElement.srcObject = stream; 
+                // Aktifkan analisis suara pada stream yang masuk
+                setupAudioAnalysis(stream);
+            }};
+            
             mediaStream = await navigator.mediaDevices.getUserMedia({{ audio: {{ echoCancellation: true, noiseSuppression: true, autoGainControl: true }} }});
             mediaStream.getAudioTracks().forEach(track => peerConnection.addTrack(track, mediaStream));
             dataChannel = peerConnection.createDataChannel('oai-events');
             dataChannel.onopen = () => {{
-                isConnected = true; isAIsTurn = true;
+                isConnected = true; isAIsTurn = false;
                 updateStatus('ai-speaking', '🔵 AI menyapa...');
                 stopBtn.disabled = false; setMicrophoneEnabled(false); visualizerEl.style.display = 'none';
                 dataChannel.send(JSON.stringify({{ type: 'conversation.item.create', item: {{ type: 'message', role: 'user', content: [{{ type: 'input_text', text: '[SYSTEM]: Sapa pengguna dengan hangat dan tanyakan apa yang ingin mereka pelajari.'}}] }} }}));
@@ -420,32 +456,30 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 else if (funcName === 'search_video') handleSearchVideo(args, callId);
                 else if (funcName === 'get_video_content') handleGetVideoContent(args, callId);
                 break;
+            
+            // Kita gunakan response.audio.started sebagai trigger awal untuk responsivitas instan
+            // Tapi logika "stop" sekarang dikendalikan penuh oleh setupAudioAnalysis()
             case 'response.audio.started':
-                if (!isAIsTurn) isAIsTurn = true;
-                updateStatus('ai-speaking', '🔵 AI Berbicara...'); setMicrophoneEnabled(false);
-                visualizerEl.style.display = 'none';
-                if (!videoEl.paused) {{ originalVideoVolume = videoEl.volume; videoEl.volume = 0.1; }}
+                // Mute paksa di awal biar cepat, nanti dijaga oleh audio analysis
+                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.75; }}
                 break;
+
             case 'input_audio_buffer.speech_started':
-                if (!isAIsTurn) {{
-                    updateStatus('speaking', '🎤 Mendengarkan...');
-                    visualizerEl.style.display = 'flex';
-                    animateVisualizer();
+                if (isAIsTurn) {{ // User memotong pembicaraan AI
+                   isAIsTurn = false;
+                   videoEl.muted = false;
+                   videoEl.playbackRate = 1.0;
                 }}
+                updateStatus('speaking', '🎤 Mendengarkan...');
+                visualizerEl.style.display = 'flex';
+                animateVisualizer();
                 break;
+                
             case 'input_audio_buffer.speech_stopped':
-                isAIsTurn = true;
                 setMicrophoneEnabled(false); updateStatus('connected', '🟢 Memproses...');
                 visualizerEl.style.display = 'none';
                 break;
-            case 'output_audio_buffer.stopped':
-                if (videoEl.volume !== originalVideoVolume) {{ videoEl.volume = originalVideoVolume; }}
-                if (isAIsTurn) {{
-                    isAIsTurn = false;
-                    updateStatus('connected', '🟢 Giliran Anda');
-                    setMicrophoneEnabled(true);
-                }}
-                break;
+                
             case 'error':
                 console.error('API Error:', event.error); updateStatus('disconnected', `🔴 Error: ${{event.error?.message || 'Unknown'}}`);
                 isAIsTurn = false;
@@ -457,9 +491,18 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     async function stopConversation() {{
         if (!peerConnection) return;
         isConnected = false; isAIsTurn = false;
+        
+        // Reset Video State saat stop
         videoEl.pause();
         videoEl.currentTime = 0;
-        videoEl.volume = originalVideoVolume;
+        videoEl.muted = false; 
+        videoEl.playbackRate = 1.0;
+        
+        // Hentikan analisis audio
+        if (audioAnalysisLoop) cancelAnimationFrame(audioAnalysisLoop);
+        if (audioContext) audioContext.close();
+        audioContext = null; audioAnalyser = null;
+
         setMicrophoneEnabled(true);
         if (dataChannel) {{ dataChannel.close(); dataChannel = null; }}
         if (peerConnection) {{ peerConnection.close(); peerConnection = null; }}

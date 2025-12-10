@@ -1,0 +1,9 @@
+[server]
+port = 8502
+address = "0.0.0.0"
+# For tunneling/debugging, disable CSRF & CORS to accept any origin
+# IMPORTANT: revert to stricter settings for production
+enableXsrfProtection = false
+enableCORS = false
+
+
