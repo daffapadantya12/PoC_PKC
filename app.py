@@ -34,12 +34,12 @@ def load_videos_data() -> dict:
 def load_system_prompt() -> str:
     """Load system prompt from markdown file."""
     if not SYSTEM_PROMPT_FILE.exists():
-        return "Kamu adalah tutor fisika yang ramah dan berpengetahuan untuk anak SD."
+        return "Kamu adalah tutor fisika yang ramah. Bicaralah dengan tempo cepat dan energik."
     try:
         with open(SYSTEM_PROMPT_FILE, encoding="utf-8") as f:
             return f.read()
     except Exception:
-        return "Kamu adalah tutor fisika yang ramah dan berpengetahuan untuk anak SD."
+        return "Kamu adalah tutor fisika yang ramah."
 
 
 def get_subtitle_data(subtitle_file: str | None) -> str | None:
@@ -156,6 +156,8 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
 
     let peerConnection = null, dataChannel = null, audioElement = null, mediaStream = null;
     let isConnected = false, isAIsTurn = false, currentVideoId = null;
+    let originalVideoVolume = 0.0;
+    let wasPlayingBeforeSpeech = false;
     let audioContext = null, audioAnalyser = null, audioAnalysisLoop = null;
     
     const statusEl = document.getElementById('status');
@@ -190,7 +192,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (!videoData || !videoData.url) return;
         
         if (currentVideoId === videoData.id) {{
-            console.log("Video sama, melakukan seek ke:", timestamp);
             navigateToTimestamp(timestamp);
             if (timestamp > 0) {{
                 const minutes = Math.floor(timestamp / 60);
@@ -222,16 +223,13 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             if (timestamp > 0) {{
                 videoEl.currentTime = timestamp;
             }}
-            
-            // Sync status video dengan status AI saat ini
             if (isAIsTurn) {{
                 videoEl.muted = true;
-                videoEl.playbackRate = 0.75;
+                videoEl.playbackRate = 0.5;
             }} else {{
                 videoEl.muted = false;
                 videoEl.playbackRate = 1.0;
             }}
-            
             videoEl.play().catch(e => console.error("Autoplay dicegah:", e));
         }}, {{ once: true }});
     }}
@@ -250,8 +248,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         }}
     }}
 
-    // --- LOGIKA DETEKSI SUARA AI (AUDIO ANALYSIS) ---
-    // Ini menggantikan ketergantungan pada event API yang sering tidak akurat timing-nya
     function setupAudioAnalysis(stream) {{
         try {{
             audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -262,48 +258,43 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             
             const dataArray = new Uint8Array(audioAnalyser.frequencyBinCount);
             let lastSpeechTime = Date.now();
-            let silenceTimer = null;
             
-            // Loop untuk cek volume terus menerus
             function checkAudioVolume() {{
                 if (!audioAnalyser) return;
-                
                 audioAnalyser.getByteFrequencyData(dataArray);
-                // Hitung rata-rata volume
                 let sum = 0;
                 for(let i = 0; i < dataArray.length; i++) sum += dataArray[i];
                 const average = sum / dataArray.length;
                 
-                // Ambang batas volume (10 dari 255 cukup untuk mendeteksi suara)
                 if (average > 10) {{
                     lastSpeechTime = Date.now();
                     if (!isAIsTurn) {{
-                        // AI TERDETEKSI MULAI BICARA
                         isAIsTurn = true;
                         updateStatus('ai-speaking', '🔵 AI Berbicara...'); 
                         setMicrophoneEnabled(false);
                         visualizerEl.style.display = 'none';
-                        
-                        // [AKSI 1] Mute & Slow Video
                         if (!videoEl.paused) {{
                             videoEl.muted = true;
-                            videoEl.playbackRate = 0.75;
+                            videoEl.playbackRate = 0.5;
                         }}
                     }}
+                    if (!videoEl.paused && (videoEl.playbackRate !== 0.5 || !videoEl.muted)) {{
+                        videoEl.playbackRate = 0.5;
+                        videoEl.muted = true;
+                    }}
                 }} else {{
-                    // Jika hening lebih dari 800ms, anggap AI selesai bicara
                     if (isAIsTurn && (Date.now() - lastSpeechTime > 800)) {{
-                        // AI SELESAI BICARA
                         isAIsTurn = false;
                         updateStatus('connected', '🟢 Giliran Anda');
                         setMicrophoneEnabled(true);
-                        
-                        // [AKSI 2] Unmute & Normal Video
                         videoEl.muted = false;
                         videoEl.playbackRate = 1.0;
                     }}
+                    if (!isAIsTurn && !videoEl.paused && videoEl.playbackRate !== 1.0) {{
+                        videoEl.playbackRate = 1.0;
+                        videoEl.muted = false;
+                    }}
                 }}
-                
                 audioAnalysisLoop = requestAnimationFrame(checkAudioVolume);
             }}
             checkAudioVolume();
@@ -403,14 +394,12 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             peerConnection = new RTCPeerConnection();
             audioElement = document.createElement('audio'); 
             audioElement.autoplay = true;
-            
-            // [REQ 1] OMONGAN AI DIPERCEPAT 1.25x
-            audioElement.playbackRate = 1.25;
+            audioElement.playbackRate = 1.25; 
             
             peerConnection.ontrack = (event) => {{ 
                 const stream = event.streams[0];
-                audioElement.srcObject = stream; 
-                // Aktifkan analisis suara pada stream yang masuk
+                audioElement.srcObject = stream;
+                audioElement.onloadedmetadata = () => {{ audioElement.playbackRate = 1.25; }};
                 setupAudioAnalysis(stream);
             }};
             
@@ -421,7 +410,19 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 isConnected = true; isAIsTurn = false;
                 updateStatus('ai-speaking', '🔵 AI menyapa...');
                 stopBtn.disabled = false; setMicrophoneEnabled(false); visualizerEl.style.display = 'none';
-                dataChannel.send(JSON.stringify({{ type: 'conversation.item.create', item: {{ type: 'message', role: 'user', content: [{{ type: 'input_text', text: '[SYSTEM]: Sapa pengguna dengan hangat dan tanyakan apa yang ingin mereka pelajari.'}}] }} }}));
+                
+                // [MODIFIKASI PENTING]: Instruksi awal diperketat agar tidak auto-play
+                dataChannel.send(JSON.stringify({{ 
+                    type: 'conversation.item.create', 
+                    item: {{ 
+                        type: 'message', 
+                        role: 'user', 
+                        content: [{{ 
+                            type: 'input_text', 
+                            text: '[SYSTEM]: Sapa pengguna dengan hangat. JANGAN panggil function/tool apapun. Cukup tanyakan apa yang ingin dipelajari.'
+                        }}] 
+                    }} 
+                }}));
                 dataChannel.send(JSON.stringify({{ type: 'response.create' }}));
             }};
             dataChannel.onmessage = (event) => handleServerEvent(JSON.parse(event.data));
@@ -456,30 +457,24 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 else if (funcName === 'search_video') handleSearchVideo(args, callId);
                 else if (funcName === 'get_video_content') handleGetVideoContent(args, callId);
                 break;
-            
-            // Kita gunakan response.audio.started sebagai trigger awal untuk responsivitas instan
-            // Tapi logika "stop" sekarang dikendalikan penuh oleh setupAudioAnalysis()
             case 'response.audio.started':
-                // Mute paksa di awal biar cepat, nanti dijaga oleh audio analysis
-                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.75; }}
+                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.5; }}
                 break;
-
             case 'input_audio_buffer.speech_started':
-                if (isAIsTurn) {{ // User memotong pembicaraan AI
+                if (isAIsTurn) {{ 
                    isAIsTurn = false;
                    videoEl.muted = false;
                    videoEl.playbackRate = 1.0;
                 }}
+                if (!videoEl.paused) {{ wasPlayingBeforeSpeech = true; videoEl.pause(); }}
                 updateStatus('speaking', '🎤 Mendengarkan...');
                 visualizerEl.style.display = 'flex';
                 animateVisualizer();
                 break;
-                
             case 'input_audio_buffer.speech_stopped':
                 setMicrophoneEnabled(false); updateStatus('connected', '🟢 Memproses...');
                 visualizerEl.style.display = 'none';
                 break;
-                
             case 'error':
                 console.error('API Error:', event.error); updateStatus('disconnected', `🔴 Error: ${{event.error?.message || 'Unknown'}}`);
                 isAIsTurn = false;
@@ -491,18 +486,13 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     async function stopConversation() {{
         if (!peerConnection) return;
         isConnected = false; isAIsTurn = false;
-        
-        // Reset Video State saat stop
         videoEl.pause();
         videoEl.currentTime = 0;
         videoEl.muted = false; 
         videoEl.playbackRate = 1.0;
-        
-        // Hentikan analisis audio
         if (audioAnalysisLoop) cancelAnimationFrame(audioAnalysisLoop);
         if (audioContext) audioContext.close();
         audioContext = null; audioAnalyser = null;
-
         setMicrophoneEnabled(true);
         if (dataChannel) {{ dataChannel.close(); dataChannel = null; }}
         if (peerConnection) {{ peerConnection.close(); peerConnection = null; }}
