@@ -31,8 +31,8 @@ def load_videos_data() -> dict:
 
 
 @st.cache_data
-def load_system_prompt() -> str:
-    """Load system prompt from markdown file."""
+def load_system_prompt(mtime: float = SYSTEM_PROMPT_FILE.stat().st_mtime if SYSTEM_PROMPT_FILE.exists() else 0.0) -> str:
+    """Load system prompt from markdown file. Cache key includes file mtime so updates are picked up."""
     if not SYSTEM_PROMPT_FILE.exists():
         return "Kamu adalah tutor fisika yang ramah. Bicaralah dengan tempo cepat dan energik."
     try:
@@ -80,38 +80,109 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
 <html>
 <head>
     <meta charset="UTF-8">
+    <!-- PENTING: Viewport meta tag agar responsif di mobile -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; }}
-        .app-container {{ display: flex; gap: 20px; padding: 16px; height: 100vh; }}
-        .chat-panel {{ width: 35%; display: flex; flex-direction: column; gap: 16px; }}
-        .panel-title {{ font-size: 18px; font-weight: 600; color: #f8fafc; display: flex; align-items: center; gap: 8px; }}
-        .control-buttons {{ display: flex; gap: 12px; }}
+        body {{ 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: #0f172a; 
+            color: #f8fafc; 
+            height: 100vh; /* Menggunakan tinggi viewport penuh */
+            overflow: hidden; /* Mencegah scroll pada body utama */
+        }}
+        
+        .app-container {{ 
+            display: flex; 
+            gap: 20px; 
+            padding: 16px; 
+            height: 100%; 
+            width: 100%;
+        }}
+        
+        /* Desktop Layout (Default) */
+        .chat-panel {{ 
+            width: 35%; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 16px; 
+            height: 100%;
+        }}
+        
+        .video-panel {{ 
+            width: 65%; 
+            display: flex; 
+            flex-direction: column; 
+            gap: 16px; 
+            height: 100%;
+        }}
+
+        /* Common Elements */
+        .panel-title {{ font-size: 18px; font-weight: 600; color: #f8fafc; display: flex; align-items: center; gap: 8px; flex-shrink: 0; }}
+        .control-buttons {{ display: flex; gap: 12px; flex-shrink: 0; }}
         .btn {{ padding: 12px 20px; border: none; border-radius: 12px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.3s ease; display: flex; align-items: center; gap: 8px; flex: 1; justify-content: center; }}
         .btn:disabled {{ opacity: 0.5; cursor: not-allowed; }}
-        .status-indicator {{ padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; display: inline-block; width: fit-content; }}
+        
+        .status-indicator {{ padding: 8px 16px; border-radius: 20px; font-size: 13px; font-weight: 500; display: inline-block; width: fit-content; flex-shrink: 0; }}
         .status-disconnected {{ background: rgba(239, 68, 68, 0.2); color: #ef4444; }}
         .status-connecting {{ background: rgba(251, 191, 36, 0.2); color: #f59e0b; }}
         .status-connected {{ background: rgba(34, 197, 94, 0.2); color: #22c55e; }}
         .status-ai-speaking {{ background: rgba(59, 130, 246, 0.2); color: #3b82f6; }}
         .status-speaking {{ background: rgba(99, 102, 241, 0.2); color: #6366f1; }}
-        .transcript-container {{ background: #1e293b; border-radius: 12px; padding: 16px; flex: 1; overflow-y: auto; display: flex; flex-direction: column; }}
-        .transcript-title {{ color: #94a3b8; font-size: 14px; margin-bottom: 12px; font-weight: 600; }}
-        .transcripts {{ display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto; }}
-        .message {{ padding: 10px 14px; border-radius: 12px; max-width: 90%; word-wrap: break-word; }}
+        
+        .transcript-container {{ background: #1e293b; border-radius: 12px; padding: 16px; flex: 1; overflow-y: auto; display: flex; flex-direction: column; min-height: 0; }}
+        .transcript-title {{ color: #94a3b8; font-size: 14px; margin-bottom: 12px; font-weight: 600; flex-shrink: 0; }}
+        .transcripts {{ display: flex; flex-direction: column; gap: 8px; flex: 1; overflow-y: auto; padding-right: 4px; }}
+        
+        .message {{ padding: 10px 14px; border-radius: 12px; max-width: 90%; word-wrap: break-word; font-size: 14px; }}
         .message-user {{ background: #6366f1; color: white; align-self: flex-end; }}
         .message-assistant {{ background: #334155; color: #f8fafc; align-self: flex-start; }}
         .empty-state {{ color: #64748b; text-align: center; padding: 40px 20px; }}
-        .video-panel {{ width: 65%; display: flex; flex-direction: column; gap: 16px; }}
-        .video-title {{ font-size: 18px; font-weight: 600; }}
-        .video-meta {{ color: #94a3b8; font-size: 13px; }}
-        .video-container {{ background: #1e293b; border-radius: 16px; padding: 16px; flex: 1; display: flex; flex-direction: column; }}
-        .video-wrapper {{ flex: 1; display: flex; align-items: center; justify-content: center; }}
-        video {{ width: 100%; max-height: 100%; border-radius: 12px; background: #000; transition: volume 0.5s ease; }}
-        .welcome-state {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; padding: 40px; }}
-        .visualizer {{ display: flex; align-items: center; justify-content: center; gap: 4px; height: 30px; margin: 8px 0; }}
+        
+        .video-title {{ font-size: 18px; font-weight: 600; flex-shrink: 0; }}
+        .video-meta {{ color: #94a3b8; font-size: 13px; flex-shrink: 0; }}
+        .video-container {{ background: #1e293b; border-radius: 16px; padding: 16px; flex: 1; display: flex; flex-direction: column; min-height: 0; }}
+        .video-wrapper {{ flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; position: relative; }}
+        video {{ width: 100%; max-height: 100%; border-radius: 12px; background: #000; transition: volume 0.5s ease; object-fit: contain; }}
+        .welcome-state {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; padding: 20px; }}
+        
+        .visualizer {{ display: flex; align-items: center; justify-content: center; gap: 4px; height: 30px; margin: 8px 0; flex-shrink: 0; }}
         .visualizer-bar {{ width: 4px; background: #6366f1; border-radius: 2px; transition: height 0.1s ease; }}
-        .search-info {{ background: rgba(99, 102, 241, 0.1); border-left: 3px solid #6366f1; padding: 8px 12px; border-radius: 0 8px 8px 0; font-size: 12px; color: #94a3b8; margin-top: 8px; }}
+        .search-info {{ background: rgba(99, 102, 241, 0.1); border-left: 3px solid #6366f1; padding: 8px 12px; border-radius: 0 8px 8px 0; font-size: 12px; color: #94a3b8; margin-top: 8px; flex-shrink: 0; }}
+
+        /* --- MOBILE RESPONSIVE STYLES --- */
+        @media (max-width: 768px) {{
+            body {{
+                height: 100dvh; /* Dynamic viewport height untuk mobile modern */
+            }}
+            .app-container {{
+                flex-direction: column; /* Ubah layout jadi atas-bawah */
+                padding: 10px;
+                gap: 10px;
+            }}
+            
+            /* Pada Mobile, Video panel di atas, Chat panel di bawah */
+            .video-panel {{
+                width: 100%;
+                height: 40%; /* Video mengambil 40% layar */
+                order: 1; /* Urutan pertama */
+                gap: 8px;
+            }}
+            
+            .chat-panel {{
+                width: 100%;
+                height: 60%; /* Chat mengambil 60% layar */
+                order: 2; /* Urutan kedua */
+                gap: 10px;
+            }}
+            
+            .video-title {{ font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+            .panel-title {{ font-size: 16px; }}
+            .btn {{ padding: 10px 16px; font-size: 13px; }}
+            
+            .video-container {{ padding: 8px; border-radius: 12px; }}
+            .transcript-container {{ padding: 10px; }}
+        }}
     </style>
 </head>
 <body>
@@ -161,6 +232,19 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     let audioContext = null, audioAnalyser = null, audioAnalysisLoop = null;
     
     const statusEl = document.getElementById('status');
+    const LOGGER_URL = 'http://127.0.0.1:8777';
+     const SESSION_ID = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+     async function loggerPost(path, payload) {{
+         try {{
+             await fetch(`${{LOGGER_URL}}${{path}}`, {{
+                 method: 'POST',
+                 headers: {{ 'Content-Type': 'application/json' }},
+                 body: JSON.stringify({{ session_id: SESSION_ID, timestamp: new Date().toISOString(), ...payload }})
+             }});
+         }} catch (e) {{ console.warn('Logger unavailable', e); }}
+     }}
+     function logDialogue(user_input, ai_response, action = null) {{ return loggerPost('/log', {{ user_input, ai_response, action }}); }}
+     function logAction(action, details = {{}}) {{ return loggerPost('/action', {{ action, details }}); }}
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const transcriptsEl = document.getElementById('transcripts');
@@ -193,6 +277,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         
         if (currentVideoId === videoData.id) {{
             navigateToTimestamp(timestamp);
+            logAction('seek_video', {{ timestamp }});
             if (timestamp > 0) {{
                 const minutes = Math.floor(timestamp / 60);
                 const seconds = Math.floor(timestamp % 60);
@@ -230,6 +315,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 videoEl.muted = false;
                 videoEl.playbackRate = 1.0;
             }}
+            logAction('play_video', {{ video_id: currentVideoId, timestamp: videoEl.currentTime }});
             videoEl.play().catch(e => console.error("Autoplay dicegah:", e));
         }}, {{ once: true }});
     }}
@@ -237,6 +323,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     function navigateToTimestamp(timestamp) {{ 
         if (videoEl.src) {{ 
             videoEl.currentTime = timestamp; 
+            logAction('seek_video', {{ timestamp }});
             videoEl.play().catch(e => console.error("Autoplay dicegah:", e)); 
         }} 
     }}
@@ -341,6 +428,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     function handleNavigateVideo(args, callId) {{
         const timestamp = args.timestamp || 0;
         navigateToTimestamp(timestamp);
+        logAction('seek_video', {{ timestamp }});
         sendFunctionResult(callId, {{ success: true, message: `Video berpindah ke detik ${{timestamp}}` }});
     }}
 
@@ -350,6 +438,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (result) {{
             const {{ video, timestamp, matchedText }} = result;
             showVideo(video, timestamp);
+            logAction('retrieve_video', {{ query, video_id: video.id, timestamp }});
             const minutes = Math.floor(timestamp / 60);
             const seconds = Math.floor(timestamp % 60);
             const timeStr = timestamp > 0 ? ` (mulai menit ${{minutes}}:${{seconds}})` : "";
@@ -370,12 +459,14 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         const segment = (video.transcript || []).find(s => timestamp >= s.start && timestamp <= s.end);
         const content = segment ? segment.text : 'Tidak ada konten pada waktu tersebut.';
         navigateToTimestamp(timestamp);
+        logAction('retrieve_video_content', {{ video_id: video.id, timestamp }});
         sendFunctionResult(callId, {{ success: true, content: content }});
     }}
 
     async function startConversation() {{
         if (peerConnection) await stopConversation();
         try {{
+            loggerPost('/start', {{}});
             updateStatus('connecting', '🟡 Menghubungkan...'); startBtn.disabled = true;
             const tokenResponse = await fetch('https://api.openai.com/v1/realtime/sessions', {{
                 method: 'POST', headers: {{ 'Authorization': `Bearer ${{API_KEY}}`, 'Content-Type': 'application/json' }},
@@ -444,10 +535,10 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (event.type !== 'input_audio_buffer.chunk') console.log(`EVENT: ${{event.type.padEnd(45, ' ')}} | isAIsTurn: ${{isAIsTurn}}`);
         switch (event.type) {{
             case 'conversation.item.input_audio_transcription.completed':
-                if (event.transcript) addTranscript('user', event.transcript);
+                if (event.transcript) {{ addTranscript('user', event.transcript); logDialogue(event.transcript, null, 'user_input'); }}
                 break;
             case 'response.audio_transcript.done':
-                if (event.transcript) addTranscript('assistant', event.transcript);
+                if (event.transcript) {{ addTranscript('assistant', event.transcript); logDialogue(null, event.transcript, 'ai_response'); }}
                 break;
             case 'response.function_call_arguments.done':
                 const funcName = event.name, callId = event.call_id;
@@ -458,12 +549,13 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 else if (funcName === 'get_video_content') handleGetVideoContent(args, callId);
                 break;
             case 'response.audio.started':
-                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.5; }}
+                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.5; logAction('mute_video', {{ reason: 'ai_speaking' }}); }}
                 break;
             case 'input_audio_buffer.speech_started':
                 isAIsTurn = false;
                 videoEl.playbackRate = 1.0;
                 videoEl.muted = true;
+                logAction('mute_video', {{ reason: 'user_speaking' }});
                 updateStatus('speaking', '🎤 Mendengarkan...');
                 visualizerEl.style.display = 'flex';
                 animateVisualizer();
@@ -473,6 +565,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 visualizerEl.style.display = 'none';
                 videoEl.muted = false;
                 videoEl.playbackRate = 1.0;
+                logAction('unmute_video', {{ reason: 'user_stopped' }});
                 break;
             case 'error':
                 console.error('API Error:', event.error); updateStatus('disconnected', `🔴 Error: ${{event.error?.message || 'Unknown'}}`);
@@ -486,6 +579,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (!peerConnection) return;
         isConnected = false; isAIsTurn = false;
         videoEl.pause();
+        logAction('pause_video', {{ reason: 'stop_conversation' }});
         videoEl.currentTime = 0;
         videoEl.muted = false; 
         videoEl.playbackRate = 1.0;
@@ -501,6 +595,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         startBtn.disabled = false; stopBtn.disabled = true;
         visualizerEl.style.display = 'none';
         searchInfoEl.style.display = 'none';
+        loggerPost('/end', {{}});
     }}
     </script>
 </body>
