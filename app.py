@@ -461,12 +461,9 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.5; }}
                 break;
             case 'input_audio_buffer.speech_started':
-                if (isAIsTurn) {{ 
-                   isAIsTurn = false;
-                   videoEl.muted = false;
-                   videoEl.playbackRate = 1.0;
-                }}
-                if (!videoEl.paused) {{ wasPlayingBeforeSpeech = true; videoEl.pause(); }}
+                isAIsTurn = false;
+                videoEl.playbackRate = 1.0;
+                videoEl.muted = true;
                 updateStatus('speaking', '🎤 Mendengarkan...');
                 visualizerEl.style.display = 'flex';
                 animateVisualizer();
@@ -474,6 +471,8 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             case 'input_audio_buffer.speech_stopped':
                 setMicrophoneEnabled(false); updateStatus('connected', '🟢 Memproses...');
                 visualizerEl.style.display = 'none';
+                videoEl.muted = false;
+                videoEl.playbackRate = 1.0;
                 break;
             case 'error':
                 console.error('API Error:', event.error); updateStatus('disconnected', `🔴 Error: ${{event.error?.message || 'Unknown'}}`);
