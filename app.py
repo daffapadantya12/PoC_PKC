@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import streamlit as st
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -11,7 +12,8 @@ load_dotenv()
 
 # Konfigurasi Path
 DATA_DIR = Path("data")
-VIDEOS_FILE = DATA_DIR / "videos.json"
+VIDEOS_FILE = DATA_DIR / "videos.json"  # Fallback
+VIDEOS_API_URL = "http://localhost:28302/content/cards/ba7a27624af1511010900f501ddea0b7dacb3d3858ce2291efe45eb4245bdf02/raw"
 SUBTITLES_DIR = DATA_DIR / "subtitles"
 SYSTEM_PROMPT_FILE = Path("system_prompt.md")
 
@@ -20,7 +22,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 @st.cache_data
 def load_videos_data() -> dict:
-    """Load video data from JSON file."""
+    """Load video data from API (preferred) or JSON file."""
+    # Try fetching from API
+    try:
+        response = requests.get(VIDEOS_API_URL, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        print(f"API Error: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"API Connection Error: {e}")
+
+    # Fallback to local file
     if not VIDEOS_FILE.exists():
         return {"videos": [], "metadata": {}}
     try:
@@ -31,8 +43,8 @@ def load_videos_data() -> dict:
 
 
 @st.cache_data
-def load_system_prompt(mtime: float = SYSTEM_PROMPT_FILE.stat().st_mtime if SYSTEM_PROMPT_FILE.exists() else 0.0) -> str:
-    """Load system prompt from markdown file. Cache key includes file mtime so updates are picked up."""
+def load_system_prompt() -> str:
+    """Load system prompt from markdown file."""
     if not SYSTEM_PROMPT_FILE.exists():
         return "Kamu adalah tutor fisika yang ramah. Bicaralah dengan tempo cepat dan energik."
     try:
@@ -233,18 +245,18 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     
     const statusEl = document.getElementById('status');
     const LOGGER_URL = 'http://127.0.0.1:8777';
-     const SESSION_ID = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-     async function loggerPost(path, payload) {{
-         try {{
-             await fetch(`${{LOGGER_URL}}${{path}}`, {{
-                 method: 'POST',
-                 headers: {{ 'Content-Type': 'application/json' }},
-                 body: JSON.stringify({{ session_id: SESSION_ID, timestamp: new Date().toISOString(), ...payload }})
-             }});
-         }} catch (e) {{ console.warn('Logger unavailable', e); }}
-     }}
-     function logDialogue(user_input, ai_response, action = null) {{ return loggerPost('/log', {{ user_input, ai_response, action }}); }}
-     function logAction(action, details = {{}}) {{ return loggerPost('/action', {{ action, details }}); }}
+    const SESSION_ID = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+    async function loggerPost(path, payload) {{
+        try {{
+            await fetch(`${{LOGGER_URL}}${{path}}`, {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{ session_id: SESSION_ID, timestamp: new Date().toISOString(), ...payload }})
+            }});
+        }} catch (e) {{ console.warn('Logger unavailable', e); }}
+    }}
+    function logDialogue(user_input, ai_response, action = null) {{ return loggerPost('/log', {{ user_input, ai_response, action }}); }}
+    function logAction(action, details = {{}}) {{ return loggerPost('/action', {{ action, details }}); }}
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const transcriptsEl = document.getElementById('transcripts');
@@ -277,7 +289,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         
         if (currentVideoId === videoData.id) {{
             navigateToTimestamp(timestamp);
-            logAction('seek_video', {{ timestamp }});
             if (timestamp > 0) {{
                 const minutes = Math.floor(timestamp / 60);
                 const seconds = Math.floor(timestamp % 60);
@@ -466,8 +477,8 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     async function startConversation() {{
         if (peerConnection) await stopConversation();
         try {{
-            loggerPost('/start', {{}});
-            updateStatus('connecting', '🟡 Menghubungkan...'); startBtn.disabled = true;
+             loggerPost('/start', {{}});
+             updateStatus('connecting', '🟡 Menghubungkan...'); startBtn.disabled = true;
             const tokenResponse = await fetch('https://api.openai.com/v1/realtime/sessions', {{
                 method: 'POST', headers: {{ 'Authorization': `Bearer ${{API_KEY}}`, 'Content-Type': 'application/json' }},
                 body: JSON.stringify({{ 
