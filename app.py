@@ -232,10 +232,16 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
     <script>
     const API_KEY = '{api_key}';
     const VIDEOS_DATA = {videos_json};
     const SYSTEM_PROMPT = '{system_prompt_escaped}';
+
+    // Initialize Markdown parser
+    const md = window.markdownit();
 
     let peerConnection = null, dataChannel = null, audioElement = null, mediaStream = null;
     let isConnected = false, isAIsTurn = false, currentVideoId = null;
@@ -244,19 +250,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     let audioContext = null, audioAnalyser = null, audioAnalysisLoop = null;
     
     const statusEl = document.getElementById('status');
-    const LOGGER_URL = 'http://127.0.0.1:8777';
-    const SESSION_ID = (self.crypto && crypto.randomUUID) ? crypto.randomUUID() : Math.random().toString(36).slice(2);
-    async function loggerPost(path, payload) {{
-        try {{
-            await fetch(`${{LOGGER_URL}}${{path}}`, {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ session_id: SESSION_ID, timestamp: new Date().toISOString(), ...payload }})
-            }});
-        }} catch (e) {{ console.warn('Logger unavailable', e); }}
-    }}
-    function logDialogue(user_input, ai_response, action = null) {{ return loggerPost('/log', {{ user_input, ai_response, action }}); }}
-    function logAction(action, details = {{}}) {{ return loggerPost('/action', {{ action, details }}); }}
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const transcriptsEl = document.getElementById('transcripts');
@@ -269,11 +262,49 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
 
     function setMicrophoneEnabled(enabled) {{ if (mediaStream) mediaStream.getAudioTracks().forEach(t => t.enabled = enabled); }}
     function updateStatus(status, text) {{ statusEl.className = `status-indicator status-${{status}}`; statusEl.textContent = text; }}
+    
+    function renderMessage(text) {{
+        // 1. Render Markdown first
+        let html = md.render(text);
+        
+        // 2. Render Block Math: $$...$$ OR \[...\]
+        html = html.replace(/(\$\$|\\\\\[)([\\s\\S]*?)(\$\$|\\\\\])/g, (match, open, tex, close) => {{
+            try {{ return katex.renderToString(tex, {{ displayMode: true }}); }}
+            catch(e) {{ return match; }}
+        }});
+        
+        // 3. Render Inline Math: $...$ OR \(...\)
+        html = html.replace(/(\$|\\\\\()([^$\\n]+?)(\$|\\\\\))/g, (match, open, tex, close) => {{
+            try {{ return katex.renderToString(tex, {{ displayMode: false }}); }}
+            catch(e) {{ return match; }}
+        }});
+        
+        // 4. Fallback: Render ( A = B ) as math if it contains latex symbols
+        // Matches ( ... = ... ) or ( ... \ ... ) pattern roughly
+        // Escape {{ and }} for f-string
+        html = html.replace(/\(\s*([a-zA-Z0-9\s\\._{{}}^]*?=[a-zA-Z0-9\s\\._{{}}^]*?)\s*\)/g, (match, tex) => {{
+             try {{ return katex.renderToString(tex, {{ displayMode: false }}); }}
+             catch(e) {{ return match; }}
+        }});
+        // Also catch ( ... \frac ... ) etc even without =
+        html = html.replace(/\(\s*(\\[a-zA-Z]+[\\s\\S]*?)\s*\)/g, (match, tex) => {{
+             // Only if it looks like latex (starts with backslash command)
+             try {{ return katex.renderToString(tex, {{ displayMode: false }}); }}
+             catch(e) {{ return match; }}
+        }});
+        
+        return html;
+    }}
+
     function addTranscript(role, text) {{
         const emptyState = transcriptsEl.querySelector('.empty-state');
         if (emptyState) emptyState.remove();
         const msgDiv = document.createElement('div');
-        msgDiv.className = `message message-${{role}}`; msgDiv.textContent = text;
+        msgDiv.className = `message message-${{role}}`; 
+        
+        // Use innerHTML with rendered content
+        msgDiv.innerHTML = renderMessage(text);
+        
         transcriptsEl.appendChild(msgDiv); transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
     }}
     function animateVisualizer() {{
@@ -326,7 +357,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 videoEl.muted = false;
                 videoEl.playbackRate = 1.0;
             }}
-            logAction('play_video', {{ video_id: currentVideoId, timestamp: videoEl.currentTime }});
             videoEl.play().catch(e => console.error("Autoplay dicegah:", e));
         }}, {{ once: true }});
     }}
@@ -334,7 +364,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     function navigateToTimestamp(timestamp) {{ 
         if (videoEl.src) {{ 
             videoEl.currentTime = timestamp; 
-            logAction('seek_video', {{ timestamp }});
             videoEl.play().catch(e => console.error("Autoplay dicegah:", e)); 
         }} 
     }}
@@ -369,7 +398,7 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                     if (!isAIsTurn) {{
                         isAIsTurn = true;
                         updateStatus('ai-speaking', '🔵 AI Berbicara...'); 
-                        setMicrophoneEnabled(false);
+                        // setMicrophoneEnabled(false); // REMOVED: Allow barge-in
                         visualizerEl.style.display = 'none';
                         if (!videoEl.paused) {{
                             videoEl.muted = true;
@@ -439,7 +468,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     function handleNavigateVideo(args, callId) {{
         const timestamp = args.timestamp || 0;
         navigateToTimestamp(timestamp);
-        logAction('seek_video', {{ timestamp }});
         sendFunctionResult(callId, {{ success: true, message: `Video berpindah ke detik ${{timestamp}}` }});
     }}
 
@@ -449,7 +477,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (result) {{
             const {{ video, timestamp, matchedText }} = result;
             showVideo(video, timestamp);
-            logAction('retrieve_video', {{ query, video_id: video.id, timestamp }});
             const minutes = Math.floor(timestamp / 60);
             const seconds = Math.floor(timestamp % 60);
             const timeStr = timestamp > 0 ? ` (mulai menit ${{minutes}}:${{seconds}})` : "";
@@ -466,19 +493,32 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
     function handleGetVideoContent(args, callId) {{
         const video = VIDEOS_DATA.find(v => v.id === (args.video_id || currentVideoId));
         if (!video) return sendFunctionResult(callId, {{ success: false, message: 'Video tidak ditemukan.'}});
+        
         const timestamp = args.timestamp || 0;
-        const segment = (video.transcript || []).find(s => timestamp >= s.start && timestamp <= s.end);
-        const content = segment ? segment.text : 'Tidak ada konten pada waktu tersebut.';
+        const transcript = video.transcript || [];
+        // Find index of the segment at or immediately following the timestamp
+        const index = transcript.findIndex(s => timestamp >= s.start && timestamp <= s.end);
+        
+        if (index === -1) {{
+             sendFunctionResult(callId, {{ success: true, content: 'Tidak ada konten pada waktu tersebut.' }});
+             return;
+        }}
+
+        // Get context: -2 to +2 segments
+        const startIdx = Math.max(0, index - 2);
+        const endIdx = Math.min(transcript.length, index + 3);
+        const contextSegments = transcript.slice(startIdx, endIdx);
+        
+        const content = contextSegments.map(s => `[${{s.start}}-${{s.end}}] ${{s.text}}`).join(" ");
+        
         navigateToTimestamp(timestamp);
-        logAction('retrieve_video_content', {{ video_id: video.id, timestamp }});
         sendFunctionResult(callId, {{ success: true, content: content }});
     }}
 
     async function startConversation() {{
         if (peerConnection) await stopConversation();
         try {{
-             loggerPost('/start', {{}});
-             updateStatus('connecting', '🟡 Menghubungkan...'); startBtn.disabled = true;
+            updateStatus('connecting', '🟡 Menghubungkan...'); startBtn.disabled = true;
             const tokenResponse = await fetch('https://api.openai.com/v1/realtime/sessions', {{
                 method: 'POST', headers: {{ 'Authorization': `Bearer ${{API_KEY}}`, 'Content-Type': 'application/json' }},
                 body: JSON.stringify({{ 
@@ -511,7 +551,9 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
             dataChannel.onopen = () => {{
                 isConnected = true; isAIsTurn = false;
                 updateStatus('ai-speaking', '🔵 AI menyapa...');
-                stopBtn.disabled = false; setMicrophoneEnabled(false); visualizerEl.style.display = 'none';
+                stopBtn.disabled = false;
+                // setMicrophoneEnabled(false); // REMOVED: Allow barge-in
+                visualizerEl.style.display = 'none';
                 
                 // [MODIFIKASI PENTING]: Instruksi awal diperketat agar tidak auto-play
                 dataChannel.send(JSON.stringify({{ 
@@ -546,10 +588,10 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (event.type !== 'input_audio_buffer.chunk') console.log(`EVENT: ${{event.type.padEnd(45, ' ')}} | isAIsTurn: ${{isAIsTurn}}`);
         switch (event.type) {{
             case 'conversation.item.input_audio_transcription.completed':
-                if (event.transcript) {{ addTranscript('user', event.transcript); logDialogue(event.transcript, null, 'user_input'); }}
+                if (event.transcript) addTranscript('user', event.transcript);
                 break;
             case 'response.audio_transcript.done':
-                if (event.transcript) {{ addTranscript('assistant', event.transcript); logDialogue(null, event.transcript, 'ai_response'); }}
+                if (event.transcript) addTranscript('assistant', event.transcript);
                 break;
             case 'response.function_call_arguments.done':
                 const funcName = event.name, callId = event.call_id;
@@ -560,23 +602,22 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
                 else if (funcName === 'get_video_content') handleGetVideoContent(args, callId);
                 break;
             case 'response.audio.started':
-                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.5; logAction('mute_video', {{ reason: 'ai_speaking' }}); }}
+                if (!videoEl.paused) {{ videoEl.muted = true; videoEl.playbackRate = 0.5; }}
                 break;
             case 'input_audio_buffer.speech_started':
                 isAIsTurn = false;
                 videoEl.playbackRate = 1.0;
                 videoEl.muted = true;
-                logAction('mute_video', {{ reason: 'user_speaking' }});
                 updateStatus('speaking', '🎤 Mendengarkan...');
                 visualizerEl.style.display = 'flex';
                 animateVisualizer();
                 break;
             case 'input_audio_buffer.speech_stopped':
-                setMicrophoneEnabled(false); updateStatus('connected', '🟢 Memproses...');
+                // setMicrophoneEnabled(false); // REMOVED: Allow barge-in
+                updateStatus('connected', '🟢 Memproses...');
                 visualizerEl.style.display = 'none';
                 videoEl.muted = false;
                 videoEl.playbackRate = 1.0;
-                logAction('unmute_video', {{ reason: 'user_stopped' }});
                 break;
             case 'error':
                 console.error('API Error:', event.error); updateStatus('disconnected', `🔴 Error: ${{event.error?.message || 'Unknown'}}`);
@@ -590,7 +631,6 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         if (!peerConnection) return;
         isConnected = false; isAIsTurn = false;
         videoEl.pause();
-        logAction('pause_video', {{ reason: 'stop_conversation' }});
         videoEl.currentTime = 0;
         videoEl.muted = false; 
         videoEl.playbackRate = 1.0;
@@ -606,16 +646,19 @@ def get_full_app_html(api_key: str, videos_data: list[dict], system_prompt: str)
         startBtn.disabled = false; stopBtn.disabled = true;
         visualizerEl.style.display = 'none';
         searchInfoEl.style.display = 'none';
-        loggerPost('/end', {{}});
     }}
     </script>
 </body>
 </html>
     """
 
+# Helper untuk membersihkan input text
+def clean_text(text):
+    return re.sub(r'[^a-zA-Z0-9 ]', '', text)
+
 def main():
     st.set_page_config(page_title="Physics Learning Assistant", page_icon="🔬", layout="wide", initial_sidebar_state="collapsed")
-    st.markdown("""<style>#MainMenu, footer, header, .stApp > header {visibility: hidden;} .main .block-container {padding: 0; max-width: 100%;} iframe {border: none !important;}</style>""", unsafe_allow_html=True)
+    st.markdown(r"""<style>#MainMenu, footer, header, .stApp > header {visibility: hidden;} .main .block-container {padding: 0; max-width: 100%;} iframe {border: none !important;}</style>""", unsafe_allow_html=True)
     if not OPENAI_API_KEY:
         st.error("OPENAI_API_KEY tidak ditemukan di file .env")
         return
