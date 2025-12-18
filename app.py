@@ -13,7 +13,7 @@ load_dotenv()
 # Konfigurasi Path
 DATA_DIR = Path("data")
 VIDEOS_FILE = DATA_DIR / "videos.json"  # Fallback
-VIDEOS_API_URL = os.getenv("VIDEOS_API_URL", "http://localhost:28302/content/cards/ba7a27624af1511010900f501ddea0b7dacb3d3858ce2291efe45eb4245bdf02/raw")
+VIDEOS_API_URL = os.getenv("VIDEOS_API_URL")
 SUBTITLES_DIR = DATA_DIR / "subtitles"
 SYSTEM_PROMPT_FILE = Path("system_prompt.md")
 
